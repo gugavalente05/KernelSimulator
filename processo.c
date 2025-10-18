@@ -8,9 +8,10 @@
 #include <sys/types.h>
 
 #define MAX_ITERACOES 50
-#define SYSCALL_FIFO "FifoSytemCall"
+#define SYSCALL_FIFO "FifoSystemCall"
 
 void processo_aplicacao() {
+
     pid_t pid = getpid();
     char systemcall[50]; 
     char dispositivo[3];
@@ -24,13 +25,16 @@ void processo_aplicacao() {
     srand((time(NULL) ^ pid));
     
     if ((fpFifo = open(SYSCALL_FIFO, O_WRONLY)) < 0) {
-        perror("Erro ao abrir Fifo");
+        perror("openFifoSYS");
         exit(1);
     }
 
     printf("Processo (PID: %d) iniciado.\n", pid);
 
     for (int count = 0; count < MAX_ITERACOES; count++) {
+
+        usleep(500000);
+
         printf("Processo (PID: %d): PC = %d\n", pid, count);
         
         valorsystemcall = rand() % 100;
@@ -58,23 +62,10 @@ void processo_aplicacao() {
             printf("--- SYSCALL GERADA: %s ---\n", systemcall);
         }
 
-        sleep(1); 
+        usleep(500000); 
     }
     
     printf("Processo (PID: %d) terminou.\n", pid);
     close(fpFifo);  
-}
-
-int main(void) {
-    if (access(SYSCALL_FIFO, F_OK) == -1) {
-        if (mkfifo(SYSCALL_FIFO, 0666) != 0) {
-            perror("Erro ao criar FIFO");
-            return 1;
-        }
-        printf("FIFO '%s' criado.\n", SYSCALL_FIFO);
-    }
-
-    processo_aplicacao();
-    return 0;
 }
 
