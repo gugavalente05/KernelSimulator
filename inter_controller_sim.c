@@ -34,18 +34,15 @@ void inter_controller_sim(void) {
 
         strcpy(interrupcao, IRQ0);
         write(fpFifo, interrupcao, sizeof(interrupcao));
-        printf("IRQ0 (Timeslice) gerada.\n");
 
         if (prob < 10) {
             strcpy(interrupcao, IRQ1);
             write(fpFifo, interrupcao, sizeof(interrupcao));
-            printf("IRQ1 (I/O D1) gerada.\n");
         }
 
         if (prob >= 10 && prob < 15) {
             strcpy(interrupcao, IRQ2);
             write(fpFifo, interrupcao, sizeof(interrupcao));
-            printf("IRQ2 (I/O D2) gerada.\n");
         }
     }
 

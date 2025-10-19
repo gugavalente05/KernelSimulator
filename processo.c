@@ -29,7 +29,6 @@ void processo_aplicacao() {
         exit(1);
     }
 
-    printf("Processo (PID: %d) iniciado.\n", pid);
 
     for (int count = 0; count < MAX_ITERACOES; count++) {
 
