@@ -34,7 +34,9 @@ void processo_aplicacao() {
 
         usleep(500000);
 
-        printf("Processo (PID: %d): PC = %d\n", pid, count);
+        if ((count % 10) == 0) {
+            printf("AP(pid=%d) : PC = %d\n", pid, count);
+        }
         
         valorsystemcall = rand() % 100;
 

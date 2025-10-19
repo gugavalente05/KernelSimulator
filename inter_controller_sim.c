@@ -11,6 +11,15 @@
 #define IRQ1 "1"
 #define IRQ2 "2"
 
+
+void set_kernel_pid(pid_t p){ KERNEL_PID = p; }
+
+void interromper(int sinal) {
+    printf("\n[IC] Recebi sinal para PAUSAR (SIGTSTP). Enviando snapshot ao kernel...\n");
+    kill(KERNEL_PID, SIGUSR1);  // kernel imprime estado
+    pause(); // pausa de verdade até receber SIGCONT manualmente
+}
+
 void inter_controller_sim(void) {
     int fpFifo;
     int prob;
@@ -25,6 +34,8 @@ void inter_controller_sim(void) {
     }
     
     printf("InterControllerSim iniciado. Enviando interrupções...\n");
+
+    signal(SIGINT, interromper); 
 
     for (;;) {
         

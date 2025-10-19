@@ -15,13 +15,66 @@
 #define FIFOSYS "FifoSystemCall"
 #define QUANTUM_TICKS 2
 
+typedef enum {
+    ST_PRONTO = 0,
+    ST_EXEC,
+    ST_BLOQ_D1,
+    ST_BLOQ_D2,
+    ST_TERM
+} estado_t;
+
+typedef struct {
+    pid_t   pid;
+    int     pc;           // "program counter"
+    estado_t st;
+    char    op_bloq[2];   // modo que bloqueou, 'R' ou 'W'
+    int     cnt_d1;       // quantas vezes acessou D1 até o PC atual
+    int     cnt_d2;       // quantas vezes acessou D2 até o PC atual
+} procinfo_t;
+
+static procinfo_t T[NUM];  // tabela simples indexada por i=0..NUM-1
+
+
 pid_t atual = -1;       
 int quantum = 0;
 Fila* proc_D1 = NULL;
 Fila* proc_D2 = NULL;
 Fila* prontos = NULL; 
 
-// Auxiliares para Round Robin
+// Auxiliar para tabela dos processos (idx_por_pid e dump_estado)
+int idx_por_pid(pid_t p){
+
+    for (int i=0;i<NUM;i++) {
+        if (T[i].pid == p) {
+            return i;
+        }
+    }
+    
+    return -1;
+}
+
+void dump_estado(int signo){
+
+    (void)signo;
+    printf("\n===== ESTADO DOS PROCESSOS (SIGUSR1) =====\n");
+    for (int i=0;i<NUM;i++){
+        if (T[i].pid<=0) continue;
+        const char* st =
+            (T[i].st==ST_PRONTO) ? "PRONTO" :
+            (T[i].st==ST_EXEC)   ? "EXECUTANDO" :
+            (T[i].st==ST_BLOQ_D1)? "BLOQ D1" :
+            (T[i].st==ST_BLOQ_D2)? "BLOQ D2" : "TERMINADO";
+        printf("AP%d (pid=%d): PC=%d | estado=%s", i, T[i].pid, T[i].pc, st);
+        if (T[i].st==ST_BLOQ_D1 || T[i].st==ST_BLOQ_D2){
+            printf(" | op=%s", T[i].op_bloq);
+        }
+        printf(" | D1=%d D2=%d\n", T[i].cnt_d1, T[i].cnt_d2);
+    }
+
+    printf("==========================================\n");
+}
+
+// Auxiliares para Round Robin (despacha_prox e preempta_atual)
 void despacha_prox(void){ // Escolhe qual o proximo processo a rodar
 
     pid_t pid_prox = -1;
@@ -31,6 +84,12 @@ void despacha_prox(void){ // Escolhe qual o proximo processo a rodar
         atual = pid_prox;
         quantum = QUANTUM_TICKS;
         kill(atual, SIGCONT);
+        int ix = idx_por_pid(atual);
+
+        if (ix >= 0){
+            T[ix].st = ST_EXEC;
+        } 
+
         printf("[KERNEL] despachou %d (quantum = %d)\n", atual, quantum);
     } 
     else { // Sem processos prontos...
@@ -44,25 +103,46 @@ void preempta_atual(void){
     if (atual == -1) return;
     kill(atual, SIGSTOP);
     prontos = insere_fila(atual, prontos);
+
+    int ix = idx_por_pid(atual);
+    if (ix >= 0){
+        T[ix].st = ST_PRONTO;
+    } 
+
     printf("[KERNEL] PREEMPCAO de %d — acabou quantum\n", atual);
     atual = -1;
     quantum = 0;
     despacha_prox();
 }
 
-// Handlers
+
+
+
+
+// Handlers (handler_sys e handler_irq)
 void handler_sys (const char* syscall){
 
     pid_t pid;
     char tipo[3], modo[2];
 
     if (sscanf(syscall, "%d;%2s;%1s", &pid, tipo, modo) != 3){
-        perror("Leitura Syscall");
-        exit(1);
+        return; // Não dar exit para não matar o kernel também...
     }
 
     printf("[KERNEL] SYSCALL de PID %d — tipo = %s — bloqueando\n", pid, tipo);
     kill(pid, SIGSTOP);
+
+    int ix = idx_por_pid(pid);
+
+    if (ix >= 0){
+
+        if (strcmp(tipo,"D1")==0) T[ix].st = ST_BLOQ_D1;
+        else  T[ix].st = ST_BLOQ_D2;
+
+        T[ix].op_bloq[0] = modo[0];
+        T[ix].op_bloq[1] = '\0';
+        T[ix].pc++;
+    }
 
     if (pid == atual){ // se for do atual, despachar.
         atual = -1;
@@ -84,12 +164,19 @@ void handler_irq (const char* irq){
     switch (irq[0]){
         case '0' : {
 
-            printf("[KERNEL] IRQ0 (tick de tempo) — quantum agora = %d\n", quantum - 1);
+            
             if (atual == -1){
+                
                 despacha_prox();
             } 
             else {
                 quantum -= 1;
+                printf("[KERNEL] IRQ0 — quantum agora = %d\n", quantum);
+                
+                int ix = idx_por_pid(atual);
+                if (ix >= 0) {
+                    T[ix].pc++;
+                }
                 if (quantum <= 0){
                     preempta_atual();
                 }
@@ -106,6 +193,14 @@ void handler_irq (const char* irq){
 
             if (pid != -1){ // A fila de processos a espera de D1 NÃO estava vazia
                 prontos = insere_fila(pid, prontos);
+
+                int ix = idx_por_pid(pid);
+                if (ix >= 0){
+                    T[ix].st = ST_PRONTO;
+                    T[ix].cnt_d1++;
+                    T[ix].op_bloq[0] = '\0';
+                }
+
                 if (atual == -1) despacha_prox();
             }
             break;
@@ -120,6 +215,14 @@ void handler_irq (const char* irq){
 
             if (pid != -1){ // A fila de processos a espera de D2 NÃO estava vazia
                 prontos = insere_fila(pid, prontos);
+
+                int ix = idx_por_pid(pid);
+                if (ix >= 0){
+                    T[ix].st = ST_PRONTO;
+                    T[ix].cnt_d2++;
+                    T[ix].op_bloq[0] = '\0';
+                }
+
                 if (atual == -1) despacha_prox();
             }
             break;
@@ -136,7 +239,9 @@ void handler_irq (const char* irq){
 // Kernel Simulator
 int kernel_sim(void){
 
-    printf("[KERNEL] INICIADO — aguardando mensagens...\n");
+    signal(SIGINT, SIG_IGN);
+    printf("[KERNEL] (%d) INICIADO — aguardando mensagens...\n", getpid());
+    signal(SIGUSR1, dump_estado);
 
     int fpFifoIpc, fpFifoSys;
     if ((fpFifoIpc = open(FIFOIPC, O_RDONLY | O_NONBLOCK)) < 0){
@@ -164,19 +269,25 @@ int kernel_sim(void){
         }
 
         if (processos[i] == 0){
-            // Filho usuário: começa parado; kernel decide quando ele roda
+            // Processo começa parado e kernel decide quando ele roda
             raise(SIGSTOP);
             processo_aplicacao();
             exit(0);
         } else {
-            // Pai (kernel): enfileira para Round-Robin
+            // kernel: enfileira para Round-Robin
             prontos = insere_fila(processos[i], prontos);
+            T[i].pid   = processos[i];
+            T[i].pc    = 0;
+            T[i].st    = ST_PRONTO;
+            T[i].op_bloq[0] = '\0';
+            T[i].cnt_d1 = 0;
+            T[i].cnt_d2 = 0;
         }
     }
 
     for (;;){
         // SYS
-        ssize_t rs = read(fpFifoSys, systemcall, sizeof(systemcall) - 1);
+        int rs = read(fpFifoSys, systemcall, sizeof(systemcall) - 1);
         if (rs > 0){
             systemcall[rs] = '\0';
             handler_sys(systemcall);
@@ -187,9 +298,9 @@ int kernel_sim(void){
         }
 
         // IRQ
-        ssize_t ri = read(fpFifoIpc, irq, sizeof(irq) - 1);
+        int ri = read(fpFifoIpc, irq, sizeof(irq) - 1);
         if (ri > 0){
-            for (ssize_t k = 0; k < ri; k++){
+            for (int k = 0; k < ri; k++){
                 handler_irq(&irq[k]); // trata byte a byte ('0','1','2')
             }
         } else if (ri == 0) {
@@ -200,7 +311,6 @@ int kernel_sim(void){
 
         // Se ninguém estiver em CPU, despachar alguém...
         if (atual == -1) despacha_prox();
-
     }
 
     return 0;
