@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "fila.h": "c",
+        "sfp.h": "c",
+        "processo.h": "c"
+    }
+}

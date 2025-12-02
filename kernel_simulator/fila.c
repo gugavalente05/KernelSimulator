@@ -1,11 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
-
-typedef struct fila Fila;
-struct fila{
-    int pid;
-    Fila* prox;
-};
+#include "fila.h"
 
 
 Fila* insere_fila (int pid, Fila* minhaFila){
