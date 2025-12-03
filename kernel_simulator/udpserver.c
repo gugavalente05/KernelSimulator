@@ -1,115 +1,173 @@
-/* 
- * udpserver.c - A simple UDP echo server 
- * usage: udpserver <port>
- */
-
 #include <stdio.h>
-#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
-#include <netdb.h>
-#include <sys/types.h> 
+#include <unistd.h>
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <errno.h>
 
-#define BUFSIZE 1024
+#include "sfp.h" 
 
-/*
- * error - wrapper for perror
- */
-void error(char *msg) {
-  perror(msg);
-  exit(1);
+#define PORT 8080
+#define ROOT_DIR "./SFSS-root-dir" 
+
+void build_path(char *dest, const char *remote_path) {
+    sprintf(dest, "%s%s", ROOT_DIR, remote_path);
+}
+
+void handle_read(sfp_msg_t *msg) {
+    char full_path[512];
+    build_path(full_path, msg->path);
+
+    FILE *f = fopen(full_path, "rb");
+    if (!f) {
+        printf("[SFSS] Erro ao ler: %s\n", full_path);
+        msg->type = -1; 
+        return;
+    }
+
+    fseek(f, msg->offset, SEEK_SET);
+    int n = fread(msg->data, 1, 16, f); 
+    if (n < 16) msg->data[n] = '\0';
+
+    fclose(f);
+    msg->type = SFP_RD_REP;
+    printf("[SFSS] READ OK: %s (Offset %d)\n", msg->path, msg->offset);
+}
+
+void handle_write(sfp_msg_t *msg) {
+    char full_path[512];
+    build_path(full_path, msg->path);
+
+    FILE *f = fopen(full_path, "r+b");
+    if (!f) f = fopen(full_path, "wb"); 
+
+    if (!f) {
+        printf("[SFSS] Erro ao escrever: %s\n", full_path);
+        msg->type = -1;
+        return;
+    }
+
+    fseek(f, msg->offset, SEEK_SET);
+    fwrite(msg->data, 1, 16, f); 
+    fclose(f);
+
+    msg->type = SFP_WR_REP;
+    printf("[SFSS] WRITE OK: %s (Offset %d)\n", msg->path, msg->offset);
+}
+
+void handle_create_dir(sfp_msg_t *msg) {
+    char full_path[512];
+    build_path(full_path, msg->path);
+
+    if (mkdir(full_path, 0777) == 0 || errno == EEXIST) {
+        msg->type = SFP_DC_REP;
+        printf("[SFSS] MKDIR OK: %s\n", msg->path);
+    } else {
+        msg->type = -1;
+    }
+}
+
+void handle_remove(sfp_msg_t *msg) {
+    char full_path[512];
+    build_path(full_path, msg->path);
+
+    if (rmdir(full_path) == 0) {
+        msg->type = SFP_DR_REP;
+        printf("[SFSS] RMDIR OK: %s\n", msg->path);
+    } 
+    else if (remove(full_path) == 0) {
+        msg->type = SFP_DR_REP;
+        printf("[SFSS] REMOVE FILE OK: %s\n", msg->path);
+    } else {
+        msg->type = -1;
+    }
+}
+
+void handle_listdir(sfp_msg_t *msg) {
+    char full_path[512];
+    build_path(full_path, msg->path);
+
+    DIR *d = opendir(full_path);
+    if (!d) {
+        msg->type = -1;
+        return;
+    }
+
+    struct dirent *dir;
+    int current_pos = 0;
+    int count = 0;
+    msg->allfilenames[0] = '\0'; 
+
+    while ((dir = readdir(d)) != NULL) {
+        if (strcmp(dir->d_name, ".") == 0 || strcmp(dir->d_name, "..") == 0)
+            continue;
+
+        int len = strlen(dir->d_name);
+        if (current_pos + len + 1 >= SFP_MAX_NAMES) break;
+
+        strcat(msg->allfilenames, dir->d_name);
+        strcat(msg->allfilenames, "|"); 
+
+        msg->fstlstpositions[count].start = current_pos;
+        msg->fstlstpositions[count].end = current_pos + len;
+        
+        current_pos += len + 1; 
+        count++;
+        if (count >= 64) break;
+    }
+    closedir(d);
+
+    msg->nrnames = count;
+    msg->type = SFP_DL_REP;
+    printf("[SFSS] LISTDIR OK: %s (%d itens)\n", msg->path, count);
 }
 
 int main(int argc, char **argv) {
-  int sockfd; /* socket */
-  int portno; /* port to listen on */
-  int clientlen; /* byte size of client's address */
-  struct sockaddr_in serveraddr; /* server's addr */
-  struct sockaddr_in clientaddr; /* client addr */
-  struct hostent *hostp; /* client host info */
-  char buf[BUFSIZE]; /* message buf */
-  char *hostaddrp; /* dotted decimal host addr string */
-  int optval; /* flag value for setsockopt */
-  int n; /* message byte size */
+    int sockfd;
+    struct sockaddr_in servaddr, cliaddr;
+    socklen_t len;
+    sfp_msg_t msg;
 
-  /* 
-   * check command line arguments 
-   */
-  if (argc != 2) {
-    fprintf(stderr, "usage: %s <port>\n", argv[0]);
-    exit(1);
-  }
-  portno = atoi(argv[1]);
+    if (argc != 2) {
+        printf("Uso: %s <porta>\n", argv[0]);
+        exit(1);
+    }
+    int port = atoi(argv[1]);
 
-  /* 
-   * socket: create the parent socket 
-   */
-  sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-  if (sockfd < 0) 
-    error("ERROR opening socket");
+    mkdir(ROOT_DIR, 0777);
 
-  /* setsockopt: Handy debugging trick that lets 
-   * us rerun the server immediately after we kill it; 
-   * otherwise we have to wait about 20 secs. 
-   * Eliminates "ERROR on binding: Address already in use" error. 
-   */
-  optval = 1;
-  setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, 
-	     (const void *)&optval , sizeof(int));
+    if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) exit(EXIT_FAILURE);
 
-  /*
-   * build the server's Internet address
-   */
-  bzero((char *) &serveraddr, sizeof(serveraddr));
-  serveraddr.sin_family = AF_INET;
-  serveraddr.sin_addr.s_addr = htonl(INADDR_ANY);
-  serveraddr.sin_port = htons((unsigned short)portno);
+    memset(&servaddr, 0, sizeof(servaddr));
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_addr.s_addr = INADDR_ANY;
+    servaddr.sin_port = htons(port);
 
-  /* 
-   * bind: associate the parent socket with a port 
-   */
-  if (bind(sockfd, (struct sockaddr *) &serveraddr, 
-	   sizeof(serveraddr)) < 0) 
-    error("ERROR on binding");
+    if (bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) exit(EXIT_FAILURE);
 
-  /* 
-   * main loop: wait for a datagram, then echo it
-   */
-  clientlen = sizeof(clientaddr);
-  while (1) {
+    printf("=== SFSS REAL Rodando na porta %d ===\n", port);
+    printf("Armazenamento em: %s\n", ROOT_DIR);
 
-    /*
-     * recvfrom: receive a UDP datagram from a client
-     */
-    bzero(buf, BUFSIZE);
-    n = recvfrom(sockfd, buf, BUFSIZE, 0,
-		 (struct sockaddr *) &clientaddr, &clientlen);
-    if (n < 0)
-      error("ERROR in recvfrom");
-
-    /* 
-     * gethostbyaddr: determine who sent the datagram
-     */
-    hostp = gethostbyaddr((const char *)&clientaddr.sin_addr.s_addr, 
-			  sizeof(clientaddr.sin_addr.s_addr), AF_INET);
-    if (hostp == NULL)
-      error("ERROR on gethostbyaddr");
-    hostaddrp = inet_ntoa(clientaddr.sin_addr);
-    if (hostaddrp == NULL)
-      error("ERROR on inet_ntoa\n");
-    printf("server received datagram from %s (%s)\n", 
-	   hostp->h_name, hostaddrp);
-    printf("server received %d/%d bytes: %s\n", strlen(buf), n, buf);
-    
-    /* 
-     * sendto: echo the input back to the client 
-     */
-    n = sendto(sockfd, buf, strlen(buf), 0, 
-	       (struct sockaddr *) &clientaddr, clientlen);
-    if (n < 0) 
-      error("ERROR in sendto");
-  }
+    while (1) {
+        len = sizeof(cliaddr);
+        int n = recvfrom(sockfd, &msg, sizeof(msg), 0, (struct sockaddr *)&cliaddr, &len);
+        
+        if (n > 0) {
+            switch (msg.type) {
+                case SFP_RD_REQ: handle_read(&msg); break;
+                case SFP_WR_REQ: handle_write(&msg); break;
+                case SFP_DC_REQ: handle_create_dir(&msg); break;
+                case SFP_DR_REQ: handle_remove(&msg); break;
+                case SFP_DL_REQ: handle_listdir(&msg); break;
+                default: msg.type = -1;
+            }
+            sendto(sockfd, &msg, sizeof(msg), 0, (struct sockaddr *)&cliaddr, len);
+        }
+    }
+    return 0;
 }
